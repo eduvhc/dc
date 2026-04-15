@@ -1,0 +1,519 @@
+#!/usr/bin/env bash
+#
+# dc — Docker companion CLI
+# Compatible with macOS and Linux
+#
+
+set -euo pipefail
+
+readonly VERSION="2.0.0"
+readonly PROG="dc"
+
+# ── Colors ──────────────────────────────────────────────────────────
+
+setup_colors() {
+    if [[ -t 1 ]] && command -v tput &>/dev/null && [[ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]]; then
+        RED=$(tput setaf 1)    GREEN=$(tput setaf 2)
+        YELLOW=$(tput setaf 3) CYAN=$(tput setaf 6)
+        BOLD=$(tput bold)      DIM=$(tput dim)
+        NC=$(tput sgr0)
+    else
+        RED='' GREEN='' YELLOW='' CYAN='' BOLD='' DIM='' NC=''
+    fi
+}
+
+# ── Logging ─────────────────────────────────────────────────────────
+
+log()     { printf "%b\n" "$*"; }
+info()    { log "${CYAN}$*${NC}"; }
+success() { log "${GREEN}✓ $*${NC}"; }
+warn()    { log "${YELLOW}$*${NC}"; }
+error()   { log "${RED}✗ $*${NC}" >&2; }
+header()  { log "\n${BOLD}${CYAN}── $* ──${NC}"; }
+dim()     { log "${DIM}$*${NC}"; }
+
+# ── Portability ─────────────────────────────────────────────────────
+
+count_lines() { wc -l | tr -d '[:space:]'; }
+
+file_size_bytes() {
+    if stat --version &>/dev/null 2>&1; then
+        stat -c%s "$1" 2>/dev/null || echo 0
+    else
+        stat -f%z "$1" 2>/dev/null || echo 0
+    fi
+}
+
+human_size() {
+    local bytes=$1
+    if command -v numfmt &>/dev/null; then
+        numfmt --to=iec "$bytes"
+    elif (( bytes >= 1073741824 )); then echo "$(( bytes / 1073741824 ))G"
+    elif (( bytes >= 1048576 ));    then echo "$(( bytes / 1048576 ))M"
+    elif (( bytes >= 1024 ));       then echo "$(( bytes / 1024 ))K"
+    else echo "${bytes}B"
+    fi
+}
+
+date_ago() {
+    local days=$1
+    if date --version &>/dev/null 2>&1; then
+        date -d "${days} days ago" +%Y-%m-%dT%H:%M:%S
+    else
+        date -v-"${days}"d +%Y-%m-%dT%H:%M:%S
+    fi
+}
+
+# ── Core ────────────────────────────────────────────────────────────
+
+check_docker() {
+    command -v docker &>/dev/null || { error "docker: command not found"; exit 127; }
+    docker info &>/dev/null       || { error "Docker daemon is not running."; exit 1; }
+}
+
+confirm() {
+    [[ "$FORCE" == true ]] && return 0
+    printf "%b [y/N] " "$1"
+    read -r answer
+    [[ "$answer" == [yY] ]]
+}
+
+is_dry_run() { [[ "$DRY_RUN" == true ]]; }
+
+get_running_ids()  { docker ps -q 2>/dev/null; }
+get_all_ids()      { docker ps -aq 2>/dev/null; }
+get_stopped_ids()  { docker ps -aq --filter "status=exited" 2>/dev/null; }
+
+# ── Operations (dc stop/kill/restart/rm) ────────────────────────────
+
+op_stop() {
+    local ids
+    ids=$(get_running_ids)
+    local count
+    count=$(echo "$ids" | grep -c . 2>/dev/null || echo 0)
+
+    if [[ "$count" -eq 0 ]]; then
+        success "No running containers."
+        return
+    fi
+
+    warn "Found ${count} running containers:"
+    docker ps --format "  {{.Names}}\t{{.Image}}\t{{.Status}}" 2>/dev/null
+
+    if is_dry_run; then return; fi
+    if confirm "Stop all?"; then
+        echo "$ids" | xargs docker stop
+        success "All containers stopped."
+    fi
+}
+
+op_kill() {
+    local ids
+    ids=$(get_running_ids)
+    local count
+    count=$(echo "$ids" | grep -c . 2>/dev/null || echo 0)
+
+    if [[ "$count" -eq 0 ]]; then
+        success "No running containers."
+        return
+    fi
+
+    warn "Found ${count} running containers:"
+    docker ps --format "  {{.Names}}\t{{.Image}}\t{{.Status}}" 2>/dev/null
+
+    if is_dry_run; then return; fi
+    if confirm "${RED}Force kill all?${NC}"; then
+        echo "$ids" | xargs docker kill
+        success "All containers killed."
+    fi
+}
+
+op_restart() {
+    local ids
+    ids=$(get_running_ids)
+    local count
+    count=$(echo "$ids" | grep -c . 2>/dev/null || echo 0)
+
+    if [[ "$count" -eq 0 ]]; then
+        success "No running containers to restart."
+        return
+    fi
+
+    warn "Found ${count} running containers:"
+    docker ps --format "  {{.Names}}\t{{.Image}}\t{{.Status}}" 2>/dev/null
+
+    if is_dry_run; then return; fi
+    if confirm "Restart all?"; then
+        echo "$ids" | xargs docker restart
+        success "All containers restarted."
+    fi
+}
+
+op_rm() {
+    local ids
+    ids=$(get_stopped_ids)
+    local count
+    count=$(echo "$ids" | grep -c . 2>/dev/null || echo 0)
+
+    if [[ "$count" -eq 0 ]]; then
+        success "No stopped containers to remove."
+        return
+    fi
+
+    warn "Found ${count} stopped containers:"
+    docker ps -a --filter "status=exited" \
+        --format "  {{.Names}}\t{{.Image}}\t{{.Status}}" 2>/dev/null
+
+    if is_dry_run; then return; fi
+    if confirm "Remove them?"; then
+        docker container prune -f
+        success "Stopped containers removed."
+    fi
+}
+
+# ── Clean commands ──────────────────────────────────────────────────
+
+clean_images() {
+    local dangling total
+    dangling=$(docker images -f "dangling=true" -q 2>/dev/null | count_lines)
+    total=$(docker images -q 2>/dev/null | count_lines)
+    warn "Found ${total} images (${dangling} dangling)."
+    if is_dry_run; then
+        docker images --format "  {{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}"
+        return
+    fi
+    if confirm "Remove all unused images?"; then
+        docker image prune -a -f
+        success "Images cleaned."
+    fi
+}
+
+clean_volumes() {
+    local count
+    count=$(docker volume ls -qf "dangling=true" 2>/dev/null | count_lines)
+    if [[ "$count" -eq 0 ]]; then
+        success "No unused volumes."
+        return
+    fi
+    warn "Found ${count} unused volumes:"
+    docker volume ls -qf "dangling=true" 2>/dev/null | while IFS= read -r vol; do
+        dim "  ${vol}"
+    done
+    if is_dry_run; then return; fi
+    if confirm "Remove them? ${RED}(data will be lost)${NC}"; then
+        docker volume prune -a -f
+        success "Volumes cleaned."
+    fi
+}
+
+clean_cache() {
+    log "Build cache usage:"
+    docker system df --format '  {{.Type}}\t{{.Size}}\t{{.Reclaimable}}' \
+        | grep -i "build" || log "  No build cache."
+    if is_dry_run; then return; fi
+    if confirm "Remove all build cache?"; then
+        docker builder prune --all -f
+        success "Build cache cleaned."
+    fi
+}
+
+clean_networks() {
+    local count
+    count=$(docker network ls -q --filter "type=custom" 2>/dev/null | count_lines)
+    if [[ "$count" -eq 0 ]]; then
+        success "No custom networks."
+        return
+    fi
+    warn "Found ${count} custom networks:"
+    docker network ls --filter "type=custom" --format "  {{.Name}}\t{{.Driver}}"
+    if is_dry_run; then return; fi
+    if confirm "Remove unused networks?"; then
+        docker network prune -f
+        success "Networks cleaned."
+    fi
+}
+
+clean_logs() {
+    local container_ids log_files=()
+    container_ids=$(get_all_ids)
+    if [[ -z "$container_ids" ]]; then
+        success "No containers found."
+        return
+    fi
+
+    while IFS= read -r cid; do
+        [[ -z "$cid" ]] && continue
+        local log_path
+        log_path=$(docker inspect --format='{{.LogPath}}' "$cid" 2>/dev/null) || continue
+        [[ -z "$log_path" || ! -f "$log_path" ]] && continue
+        local size
+        size=$(file_size_bytes "$log_path")
+        (( size > 0 )) && log_files+=("$log_path")
+    done <<< "$container_ids"
+
+    if [[ ${#log_files[@]} -eq 0 ]]; then
+        success "No container logs to truncate."
+        return
+    fi
+    warn "Found ${#log_files[@]} non-empty log files:"
+    for f in "${log_files[@]}"; do
+        dim "  $(human_size "$(file_size_bytes "$f")")  $f"
+    done
+    if is_dry_run; then return; fi
+    if confirm "Truncate all container logs?"; then
+        for f in "${log_files[@]}"; do : > "$f"; done
+        success "Logs truncated."
+    fi
+}
+
+clean_old() {
+    local days=${1:-30}
+    [[ "$days" =~ ^[0-9]+$ ]] || { error "Invalid number of days: $days"; exit 1; }
+
+    local cutoff
+    cutoff=$(date_ago "$days") || { error "Could not calculate date."; exit 1; }
+
+    log "Finding images older than ${YELLOW}${days}${NC} days..."
+    local old_images=()
+    while IFS= read -r line; do
+        local id created
+        id=$(awk '{print $1}' <<< "$line")
+        created=$(awk '{print $2}' <<< "$line")
+        [[ "$created" < "$cutoff" ]] && old_images+=("$id")
+    done < <(docker images --format '{{.ID}} {{.CreatedAt}}' 2>/dev/null)
+
+    if [[ ${#old_images[@]} -eq 0 ]]; then
+        success "No images older than ${days} days."
+        return
+    fi
+    warn "Found ${#old_images[@]} images older than ${days} days:"
+    for id in "${old_images[@]}"; do
+        docker images --format "  {{.Repository}}:{{.Tag}} ({{.Size}}, {{.CreatedSince}})" \
+            --filter "id=$id" 2>/dev/null
+    done | head -20
+    if is_dry_run; then return; fi
+    if confirm "Remove these images?"; then
+        printf '%s\n' "${old_images[@]}" | xargs docker rmi -f 2>/dev/null || true
+        success "Old images removed."
+    fi
+}
+
+clean_all() {
+    header "Before"
+    docker system df
+    echo
+
+    if is_dry_run; then
+        warn "Dry run — showing what would be cleaned:"
+        for sub in op_rm clean_images clean_volumes clean_cache clean_networks; do
+            echo; $sub
+        done
+        return
+    fi
+    if confirm "${RED}Remove ALL unused containers, images, volumes, networks and build cache?${NC}"; then
+        echo
+        docker system prune -a --volumes -f
+        echo
+        docker builder prune --all -f
+        echo
+        header "After"
+        docker system df
+        echo
+        success "Done."
+    fi
+}
+
+# ── Status ──────────────────────────────────────────────────────────
+
+cmd_status() {
+    header "Disk Usage"
+    docker system df
+    echo
+
+    header "Containers"
+    local running stopped
+    running=$(get_running_ids | count_lines)
+    stopped=$(get_stopped_ids | count_lines)
+    log "  Running: ${GREEN}${running}${NC}  Stopped: ${YELLOW}${stopped}${NC}"
+    if [[ "$running" -gt 0 ]]; then
+        docker ps --format "    ${DIM}{{.Names}}${NC}\t{{.Image}}\t{{.Status}}" 2>/dev/null
+    fi
+
+    header "Images"
+    local dangling total
+    dangling=$(docker images -f "dangling=true" -q 2>/dev/null | count_lines)
+    total=$(docker images -q 2>/dev/null | count_lines)
+    log "  Total: ${BOLD}${total}${NC}  Dangling: ${YELLOW}${dangling}${NC}"
+
+    header "Volumes"
+    local vol_total vol_dangling
+    vol_total=$(docker volume ls -q 2>/dev/null | count_lines)
+    vol_dangling=$(docker volume ls -qf "dangling=true" 2>/dev/null | count_lines)
+    log "  Total: ${BOLD}${vol_total}${NC}  Unused: ${YELLOW}${vol_dangling}${NC}"
+    if [[ "$vol_total" -gt 0 ]]; then
+        docker volume ls --format "    ${DIM}{{.Name}}${NC}" 2>/dev/null | head -10
+        (( vol_total > 10 )) && dim "    ... and $((vol_total - 10)) more"
+    fi
+
+    header "Networks"
+    local networks
+    networks=$(docker network ls -q --filter "type=custom" 2>/dev/null | count_lines)
+    log "  Custom: ${BOLD}${networks}${NC}"
+}
+
+# ── Nuke (stop + rm + clean all) ───────────────────────────────────
+
+cmd_nuke() {
+    header "Before"
+    docker system df
+    echo
+
+    local running
+    running=$(get_running_ids | count_lines)
+
+    if is_dry_run; then
+        warn "Dry run — showing what would happen:"
+        (( running > 0 )) && { echo; op_stop; }
+        echo; op_rm
+        echo; clean_images
+        echo; clean_volumes
+        echo; clean_cache
+        echo; clean_networks
+        echo; clean_logs
+        return
+    fi
+
+    if confirm "${RED}${BOLD}NUKE: Stop all containers, then remove everything?${NC}"; then
+        # 1. Stop running containers
+        if (( running > 0 )); then
+            info "Stopping ${running} containers..."
+            get_running_ids | xargs docker stop 2>/dev/null
+            success "Containers stopped."
+        fi
+
+        # 2. Prune everything
+        echo
+        docker system prune -a --volumes -f
+        echo
+        docker builder prune --all -f
+
+        # 3. Truncate logs
+        local container_ids
+        container_ids=$(get_all_ids)
+        if [[ -n "$container_ids" ]]; then
+            while IFS= read -r cid; do
+                local lp
+                lp=$(docker inspect --format='{{.LogPath}}' "$cid" 2>/dev/null) || continue
+                [[ -f "$lp" ]] && : > "$lp"
+            done <<< "$container_ids"
+        fi
+
+        echo
+        header "After"
+        docker system df
+        echo
+        success "Nuked."
+    fi
+}
+
+# ── Usage ───────────────────────────────────────────────────────────
+
+usage() {
+    cat <<EOF
+${BOLD}${PROG}${NC} v${VERSION} — Docker companion CLI
+
+${BOLD}Usage:${NC}
+  ${PROG} [command] [options]
+
+${BOLD}Operations:${NC}
+  stop              Stop all running containers
+  kill              Force kill all running containers
+  restart           Restart all running containers
+  rm                Remove stopped containers
+
+${BOLD}Cleanup:${NC}
+  clean images      Remove unused images
+  clean volumes     Remove unused volumes
+  clean cache       Remove build cache
+  clean networks    Remove unused networks
+  clean logs        Truncate container log files
+  clean old [days]  Remove images older than N days ${DIM}(default: 30)${NC}
+  clean all         Remove all unused Docker data
+
+${BOLD}Combo:${NC}
+  nuke              Stop → remove → clean everything ${DIM}(the nuclear option)${NC}
+
+${BOLD}Info:${NC}
+  status            Show disk usage and overview ${DIM}(default)${NC}
+
+${BOLD}Options:${NC}
+  -f, --force       Skip confirmation prompts
+  -d, --dry-run     Show what would happen without doing it
+  -v, --version     Show version
+  -h, --help        Show this help message
+
+${BOLD}Examples:${NC}
+  ${PROG}                      Overview of Docker usage
+  ${PROG} stop                 Stop all running containers
+  ${PROG} stop -f              Stop all without confirmation
+  ${PROG} rm                   Remove stopped containers
+  ${PROG} clean all            Remove all unused data
+  ${PROG} clean images -d      Preview unused images
+  ${PROG} clean old 7          Remove images older than 7 days
+  ${PROG} nuke                 Stop everything + full cleanup
+  ${PROG} nuke -f              Same but skip all confirmations
+EOF
+}
+
+# ── Main ────────────────────────────────────────────────────────────
+
+main() {
+    setup_colors
+
+    FORCE=false
+    DRY_RUN=false
+    local cmd="" subcmd="" args=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)      usage; exit 0 ;;
+            -v|--version)   echo "${PROG} v${VERSION}"; exit 0 ;;
+            -f|--force)     FORCE=true; shift ;;
+            -d|--dry-run)   DRY_RUN=true; shift ;;
+            -*)             error "Unknown option: $1"; echo; usage; exit 1 ;;
+            *)
+                if   [[ -z "$cmd" ]];    then cmd="$1"
+                elif [[ -z "$subcmd" ]]; then subcmd="$1"
+                else args+=("$1")
+                fi
+                shift ;;
+        esac
+    done
+
+    check_docker
+
+    case "${cmd:-status}" in
+        status)   cmd_status ;;
+        stop)     op_stop ;;
+        kill)     op_kill ;;
+        restart)  op_restart ;;
+        rm)       op_rm ;;
+        nuke)     cmd_nuke ;;
+        clean)
+            case "${subcmd:-}" in
+                images)    clean_images ;;
+                volumes)   clean_volumes ;;
+                cache)     clean_cache ;;
+                networks)  clean_networks ;;
+                logs)      clean_logs ;;
+                old)       clean_old "${args[0]:-}" ;;
+                all)       clean_all ;;
+                "")        error "Missing subcommand. Use: ${PROG} clean -h"; echo; usage; exit 1 ;;
+                *)         error "Unknown: ${PROG} clean ${subcmd}"; echo; usage; exit 1 ;;
+            esac
+            ;;
+        *)  error "Unknown command: $cmd"; echo; usage; exit 1 ;;
+    esac
+}
+
+main "$@"
