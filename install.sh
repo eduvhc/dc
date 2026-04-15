@@ -11,9 +11,9 @@ SKILL_DIR="${HOME}/.claude/skills/dc"
 
 # Colors
 if [[ -t 1 ]] && command -v tput &>/dev/null; then
-    GREEN=$(tput setaf 2) YELLOW=$(tput setaf 3) CYAN=$(tput setaf 6) BOLD=$(tput bold) NC=$(tput sgr0)
+    GREEN=$(tput setaf 2) YELLOW=$(tput setaf 3) CYAN=$(tput setaf 6) MAGENTA=$(tput setaf 5) BOLD=$(tput bold) NC=$(tput sgr0)
 else
-    GREEN='' YELLOW='' CYAN='' BOLD='' NC=''
+    GREEN='' YELLOW='' CYAN='' MAGENTA='' BOLD='' NC=''
 fi
 
 log()     { printf "%b\n" "$*"; }
@@ -51,19 +51,19 @@ fi
 if command -v claude &>/dev/null; then
     log ""
     if [[ -f "${SKILL_DIR}/SKILL.md" ]]; then
-        info "Claude Code detected — skill already installed"
-        printf "%b [y/N] " "Update Claude Code skill?"
+        log "${MAGENTA}✦${NC} ${BOLD}Claude Code${NC} detected — skill already installed"
+        printf "${MAGENTA}✦${NC} Update Claude Code skill? [y/N] "
     else
-        info "Claude Code detected"
-        printf "%b [y/N] " "Install Claude Code skill for dc?"
+        log "${MAGENTA}✦${NC} ${BOLD}Claude Code${NC} detected"
+        printf "${MAGENTA}✦${NC} Install Claude Code skill for dc? [y/N] "
     fi
     read -r answer
     if [[ "$answer" == [yY] ]]; then
         mkdir -p "$SKILL_DIR"
         curl -fsSL "${REPO}/skill/SKILL.md" -o "${SKILL_DIR}/SKILL.md"
-        success "Claude Code skill ready — use ${BOLD}/dc${NC} in Claude Code"
+        log "${MAGENTA}✦${NC} ${GREEN}Skill installed${NC} — use ${BOLD}/dc${NC} in Claude Code"
     else
-        info "Skipped Claude Code skill"
+        log "${MAGENTA}✦${NC} Skipped"
     fi
 fi
 
