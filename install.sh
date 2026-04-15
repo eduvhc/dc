@@ -49,16 +49,22 @@ fi
 
 # Install Claude Code skill (optional)
 if command -v claude &>/dev/null; then
-    mkdir -p "$SKILL_DIR"
+    log ""
     if [[ -f "${SKILL_DIR}/SKILL.md" ]]; then
-        info "Updating Claude Code skill..."
+        info "Claude Code detected — skill already installed"
+        printf "%b [y/N] " "Update Claude Code skill?"
     else
-        info "Installing Claude Code skill..."
+        info "Claude Code detected"
+        printf "%b [y/N] " "Install Claude Code skill for dc?"
     fi
-    curl -fsSL "${REPO}/skill/SKILL.md" -o "${SKILL_DIR}/SKILL.md"
-    success "Claude Code skill ready"
-else
-    info "Claude Code not found — skipping skill install"
+    read -r answer
+    if [[ "$answer" == [yY] ]]; then
+        mkdir -p "$SKILL_DIR"
+        curl -fsSL "${REPO}/skill/SKILL.md" -o "${SKILL_DIR}/SKILL.md"
+        success "Claude Code skill ready — use ${BOLD}/dc${NC} in Claude Code"
+    else
+        info "Skipped Claude Code skill"
+    fi
 fi
 
 # Check PATH
