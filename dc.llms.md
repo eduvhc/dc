@@ -91,14 +91,52 @@ dc stop -f && dc rm -f
 
 ## When to Use Each Command
 
-| Scenario | Command |
-|----------|---------|
-| "How much disk is Docker using?" | `dc` |
-| "Stop everything for maintenance" | `dc stop` |
-| "Container won't stop" | `dc kill` |
-| "Clean up after dev session" | `dc clean all` |
-| "Total reset, fresh start" | `dc nuke` |
-| "Disk is full, need space NOW" | `dc nuke -f` |
-| "Clean old CI images" | `dc clean old 7 -f` |
-| "Logs eating disk" | `dc clean logs` |
-| "What would cleanup remove?" | `dc nuke -d` |
+### Diagnostics
+
+| Scenario | Command | Why this one |
+|----------|---------|-------------|
+| Check Docker disk usage | `dc` | Quick overview of all resource types with counts and sizes |
+| See what cleanup would free | `dc nuke -d` | Dry run walks through every cleanup step without deleting |
+| Preview specific cleanup | `dc clean images -d` | Shows exact images/volumes/etc. that would be removed |
+| Check if anything is running | `dc status` | Lists running containers with names, images, and uptime |
+
+### Container Operations
+
+| Scenario | Command | Why this one |
+|----------|---------|-------------|
+| Stop everything for maintenance | `dc stop` | Graceful SIGTERM — lets containers shut down cleanly |
+| Container hanging / won't stop | `dc kill` | SIGKILL — immediate termination, last resort |
+| Restart after config change | `dc restart` | Stops and starts all running containers in place |
+| Clean up stopped containers | `dc rm` | Removes exited containers only, leaves running ones alone |
+| Stop then remove all | `dc stop -f && dc rm -f` | Chain for full container teardown without cleaning images/volumes |
+
+### Cleanup — Targeted
+
+| Scenario | Command | Why this one |
+|----------|---------|-------------|
+| Disk full, need space fast | `dc clean cache -f` | Build cache is usually the biggest offender (often 10-50GB) |
+| Too many old images piling up | `dc clean images` | Removes all images not used by running containers |
+| Old CI/CD images after deploy | `dc clean old 7 -f` | Age-based — only removes images older than N days |
+| Database volumes from old projects | `dc clean volumes` | Lists volume names before deleting so you can verify |
+| Log files growing unbounded | `dc clean logs` | Truncates in-place without removing — containers keep logging |
+| Orphaned networks after compose down | `dc clean networks` | Removes custom networks not attached to any container |
+| Clean everything unused at once | `dc clean all` | Single command for images + volumes + cache + networks + containers |
+
+### Cleanup — Nuclear
+
+| Scenario | Command | Why this one |
+|----------|---------|-------------|
+| Full dev environment reset | `dc nuke` | Stops all → removes all → cleans all → truncates logs. One prompt |
+| Automated weekly cleanup (cron) | `dc nuke -f` | Same pipeline, no prompts. Safe for non-interactive environments |
+| Before switching projects | `dc nuke` | Ensures no port conflicts, stale volumes, or leftover state |
+| CI runner disk reclamation | `dc nuke -f` | Runners accumulate garbage fast — run after each pipeline |
+
+### Composition Patterns
+
+| Scenario | Commands | Why |
+|----------|----------|-----|
+| Careful cleanup | `dc nuke -d` then `dc nuke` | Preview first, then execute |
+| Stop but keep images | `dc stop -f && dc rm -f && dc clean cache -f` | Preserves images for faster restarts |
+| Clean only dangling | `dc clean images` | Only removes images not referenced by any container |
+| Maintenance window | `dc stop -f` → do work → `dc restart -f` | Pause/resume without destroying anything |
+| Emergency disk recovery | `dc nuke -f && dc clean logs -f` | Maximum space reclamation, no questions |
